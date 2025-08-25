@@ -18,16 +18,6 @@ contract RebaseERC20 is IERC20Errors, IRebaseTokenErrors, IERC20 {
     /// @dev This mapping is used to store the allowance of the owner for the spender
     mapping (address owner => mapping(address spender => uint256 allowance)) internal _allowance;
 
-    /// @notice Function returns the amount of underlying token(e.g: ETH, USDT, etc) that can be withdrawn by the user
-    /// @dev The amount of underlying token that can be withdrawn by the user is computed as:
-    /// `user shares * total contract balance of underlying token / total shares``
-    /// @param account The address of the user
-    /// @return The amount of underlying token that can be withdrawn by the user
-    function balanceOf(address account) public view returns(uint256) {
-        if (_totalShares == 0) return 0;
-        return shareBalance[account] * address(this).balance / _totalShares;
-    }
-
     /// @notice User deposits underlying token to the contract, and mints an amount of shares that represents 
     /// their percent ownership of all outstanding shares.
     /// @dev If user a 1st minter, then the amount of shares minted is simply `msg.value`.
@@ -72,8 +62,11 @@ contract RebaseERC20 is IERC20Errors, IRebaseTokenErrors, IERC20 {
         // It is possible when _totalShares * amount < address(this).balance, then sharesToBurn = 0.
         if (sharesToBurn == 0) revert ZeroSharesToBurn(); 
 
-        _totalShares -= sharesToBurn;
+        // If user provide an amount of underl. token that he doesn't have in reality, then
+        // the `sharesToBurn` will exceed the `shareBalance[from]` --> as a result, the transaction will revert
+        // due to underflow in the next line
         shareBalance[from] -= sharesToBurn;
+        _totalShares -= sharesToBurn;
 
         (bool success, ) = payable(from).call{value: amount}("");
         if (!success) revert ERC20InvalidReceiver(from);
@@ -93,17 +86,27 @@ contract RebaseERC20 is IERC20Errors, IRebaseTokenErrors, IERC20 {
     /// Approval behave like a usual approval in ERC-20 token, and it is not rebased.
     /// @dev The spender can then spend the shares using `transferFrom` or `burn`
     /// @param spender The address of the spender
-    /// @param value The amount of shares to approve 
+    /// @param amount The amount of shares to approve 
     /// @return True if the approval is successful, false otherwise
-    function approve(address spender, uint256 value) external returns (bool) {
+    function approve(address spender, uint256 amount) external returns (bool) {
         if (msg.sender == address(0)) revert ERC20InvalidApprover(msg.sender);
         if (spender == address(0)) revert ERC20InvalidSpender(spender);
 
-        _allowance[msg.sender][spender] = value;
-        emit Approval(msg.sender, spender, value);
+        _allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
         return true;
     }
 
+    /// @notice Function returns the amount of underlying token(e.g: ETH, USDT, etc) that can be withdrawn by the user
+    /// @dev The amount of underlying token that can be withdrawn by the user is computed as:
+    /// `user shares * total contract balance of underlying token / total shares`
+    /// @param account The address of the user
+    /// @return The amount of underlying token that can be withdrawn by the user
+    function balanceOf(address account) public view returns(uint256) {
+        if (_totalShares == 0) return 0;
+        return shareBalance[account] * address(this).balance / _totalShares;
+    }
+    
     /// @notice Returns the total amount of underlying token(e.g: ETH, USDT, etc) held by the contract
     function totalSupply() public view returns (uint256) {
         return address(this).balance;
@@ -112,10 +115,10 @@ contract RebaseERC20 is IERC20Errors, IRebaseTokenErrors, IERC20 {
     /// @notice Transfers shares from the caller to another address
     /// @dev This function is a wrapper around `transferFrom` that calls it with the caller as the `from` address 
     /// @param to The address which will receive the shares
-    /// @param value The amount of shares to transfer
+    /// @param amount The amount of shares to transfer
     /// @return True if the transfer is successful, false otherwise
-    function transfer(address to, uint256 value) external returns (bool) {
-        transferFrom(msg.sender, to, value);
+    function transfer(address to, uint256 amount) external returns (bool) {
+        transferFrom(msg.sender, to, amount);
         return true;
     }
 
@@ -124,17 +127,19 @@ contract RebaseERC20 is IERC20Errors, IRebaseTokenErrors, IERC20 {
     /// Be aware that with the above formula division rounds down, this means that the balance received by `to` might be very slightly less than `value`.
     /// @param from The address which will transfer the shares
     /// @param to The address which will receive the shares
-    /// @param value The amount of shares to transfer
+    /// @param amount The amount of shares to transfer
     /// @return True if the transfer is successful, false otherwise
-    function transferFrom(address from, address to, uint256 value) public returns (bool) {
+    function transferFrom(address from, address to, uint256 amount) public returns (bool) {
         if (from == address(0)) revert ERC20InvalidSender(from);
         if (to == address(0)) revert ERC20InvalidReceiver(to);
 
-        uint256 sharesToTransfer = _amountToShares(value);
+        _spendAllowanceOrBlock(from, msg.sender, amount);
+        
+        uint256 sharesToTransfer = _amountToShares(amount);
         shareBalance[from] -= sharesToTransfer;
         shareBalance[to] += sharesToTransfer;
 
-        emit Transfer(from, to, value);
+        emit Transfer(from, to, amount);
         return true;
     }
 
